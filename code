@@ -1,76 +1,93 @@
--- ================================================
--- STEAL AN EGG HUB — EGG SYSTEM BYPASS + SPAWN ALERT
--- Remplace les onglets Egg du build précédent
--- ================================================
+-- ====================================================================
+-- STEAL AN EGG HUB — BUILD FINAL
+-- 7 onglets | Rayfield | Godmode | Bypass Farm | Spawn Alert
+-- ====================================================================
 
-local Players          = game:GetService("Players")
-local RunService       = game:GetService("RunService")
+-- SERVICES
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
+local UserInputService  = game:GetService("UserInputService")
+local TweenService      = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TweenService     = game:GetService("TweenService")
-local UserInputService = game:GetService("UserInputService")
+local StarterGui        = game:GetService("StarterGui")
+local Debris            = game:GetService("Debris")
+local TeleportService   = game:GetService("TeleportService")
 
 local LocalPlayer = Players.LocalPlayer
-local Character   = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-local HRP         = Character:WaitForChild("HumanoidRootPart")
+local Rayfield    = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
 
--- ================================================
--- CONFIG — ŒUFS RARES À SURVEILLER
--- Ajoute ici les mots-clés exacts présents dans les noms d'objets du jeu
--- ================================================
-
-local RARE_KEYWORDS = {
-    "Eternal", "eternal", "ETERNAL",
-    "Secret",  "secret",  "SECRET",
-    "Mythic",  "mythic",  "MYTHIC",
-    "Divine",  "divine",  "DIVINE",
-    "Celestial","celestial",
-    "Omega",   "omega",
-    "Ultra",   "ultra",
-    "Godly",   "godly",
-}
-
-local ALL_EGG_KEYWORDS = {
-    "Egg", "egg", "EGG",
-    "oeuf", "Oeuf",
-}
-
--- ================================================
--- STATE
--- ================================================
+-- ====================================================================
+-- STATE GLOBAL
+-- ====================================================================
 
 local State = {
-    AutoFarm      = false,
-    SpawnAlert    = true,
-    AutoTeleport  = true,   -- téléporte auto sur spawn rare
-    FarmDelay     = 0.08,   -- délai entre chaque tentative (secondes)
-    AlertSound    = true,
-    EggType       = "All",
+    -- Mouvement
+    WalkSpeed    = 16,
+    InfJump      = false,
+    NoClip       = false,
+    -- Survie
+    Godmode      = false,
+    CustomMaxHP  = 100,
+    -- Egg
+    AutoFarm     = false,
+    EggType      = "All",
+    FarmDelay    = 0.08,
+    AutoSell     = false,
+    AutoHatch    = false,
+    -- Spawn Alert
+    SpawnAlert   = true,
+    AutoTeleport = true,
+    AlertSound   = true,
+    -- Combat
+    AutoClick    = false,
+    AutoClickCPS = 20,
+    AimbotOn     = false,
+    AimbotRange  = 50,
+    -- ESP
+    ESPPlayers   = false,
+    ESPEggs      = false,
+    ESPItems     = false,
+    -- Misc
+    AntiAFK      = false,
+    NoFog        = false,
+    -- Server
+    ServerRegion = "Auto",
 }
 
-local KnownEggs   = {}  -- { [instance] = true } — évite les doublons d'alerte
-local FarmThread  = nil
-local WatchThread = nil
+-- ====================================================================
+-- CONNEXIONS ACTIVES
+-- ====================================================================
 
--- ================================================
--- UTILITAIRES
--- ================================================
+local Connections     = {}
+local GodmodeConn     = nil
+local NoClipConn      = nil
+local AntiAFKConn     = nil
+local SpawnWatcherConn = nil
+local ESPFolder       = nil
+local FarmThread      = nil
+local SellThread      = nil
+local HatchThread     = nil
+local AutoClickThread = nil
+local AimbotThread    = nil
+local KnownRares      = {}   -- { [instance] = true }
 
-local function GetHRP()
-    local c = LocalPlayer.Character
-    return c and c:FindFirstChild("HumanoidRootPart")
-end
+-- ====================================================================
+-- KEYWORDS
+-- ====================================================================
 
-local function GetHumanoid()
-    local c = LocalPlayer.Character
-    return c and c:FindFirstChildOfClass("Humanoid")
-end
-
-local function TeleportTo(cf)
-    local hrp = GetHRP()
-    if hrp and cf then
-        hrp.CFrame = CFrame.new(cf.Position + Vector3.new(0, 4, 0))
-    end
-end
+local EGG_KW  = {"Egg","egg","EGG","oeuf","Oeuf"}
+local SELL_KW = {"Sell","sell","SELL","Shop","shop","Vendor","vendor","NPC","npc"}
+local ITEM_KW = {"collectible","Collectible","pickup","Pickup","item","Item","drop","Drop","coin","Coin"}
+local RARE_KW = {
+    "Eternal","eternal","ETERNAL",
+    "Secret","secret","SECRET",
+    "Mythic","mythic","MYTHIC",
+    "Divine","divine","DIVINE",
+    "Celestial","celestial",
+    "Omega","omega",
+    "Ultra","ultra",
+    "Godly","godly",
+}
 
 local function MatchAny(name, keywords)
     for _, kw in ipairs(keywords) do
@@ -79,13 +96,13 @@ local function MatchAny(name, keywords)
     return false
 end
 
-local function IsRare(name)
-    return MatchAny(name, RARE_KEYWORDS)
-end
+-- ====================================================================
+-- UTILITAIRES PERSONNAGE
+-- ====================================================================
 
-local function IsEgg(name)
-    return MatchAny(name, ALL_EGG_KEYWORDS)
-end
+local function GetChar()       return LocalPlayer.Character end
+local function GetHumanoid()   local c=GetChar(); return c and c:FindFirstChildOfClass("Humanoid") end
+local function GetHRP()        local c=GetChar(); return c and c:FindFirstChild("HumanoidRootPart") end
 
 local function GetPivot(obj)
     if obj:IsA("Model") then
@@ -99,200 +116,28 @@ local function GetPivot(obj)
     return nil
 end
 
--- ================================================
--- BYPASS — DÉTECTION DES REMOTEEVENTS DU JEU
--- Scan ReplicatedStorage pour trouver les events de collecte
--- ================================================
-
-local function ScanRemotes()
-    local remotes = {}
-    local function scan(parent)
-        for _, obj in ipairs(parent:GetChildren()) do
-            if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
-                local n = obj.Name:lower()
-                -- Mots-clés typiques des events de collecte dans les jeux egg
-                if string.find(n,"collect") or string.find(n,"pick")
-                or string.find(n,"grab")   or string.find(n,"get")
-                or string.find(n,"egg")    or string.find(n,"touch")
-                or string.find(n,"interact") or string.find(n,"claim")
-                or string.find(n,"hatch")  or string.find(n,"obtain") then
-                    table.insert(remotes, obj)
-                end
-            end
-            -- Récursif dans les dossiers
-            if obj:IsA("Folder") or obj:IsA("Configuration") then
-                scan(obj)
-            end
-        end
-    end
-    scan(ReplicatedStorage)
-    -- Cherche aussi dans workspace (certains jeux y mettent leurs remotes)
-    scan(workspace)
-    return remotes
-end
-
-local CollectRemotes = ScanRemotes()
-
--- ================================================
--- BYPASS — MÉTHODE 1 : FIRE REMOTEEVENT DIRECT
--- ================================================
-
-local function TryFireRemotes(egg)
-    if #CollectRemotes == 0 then return false end
-    local cf = GetPivot(egg)
-    local pos = cf and cf.Position or Vector3.zero
-    local fired = false
-
-    for _, remote in ipairs(CollectRemotes) do
-        -- Essaie plusieurs signatures d'arguments communes
-        pcall(function() remote:FireServer() end)
-        pcall(function() remote:FireServer(egg) end)
-        pcall(function() remote:FireServer(pos) end)
-        pcall(function() remote:FireServer(egg, pos) end)
-        pcall(function() remote:FireServer(LocalPlayer, egg) end)
-        pcall(function() remote:FireServer(true) end)
-        pcall(function() remote:FireServer("collect") end)
-        pcall(function() remote:FireServer("collect", egg) end)
-        fired = true
-    end
-    return fired
-end
-
--- ================================================
--- BYPASS — MÉTHODE 2 : SIMULATE TOUCH EVENT
--- Force un contact physique avec l'œuf via CFrame
--- ================================================
-
-local function TryTouchBypass(egg)
+local function TeleportTo(cf)
     local hrp = GetHRP()
-    if not hrp then return end
-    local cf = GetPivot(egg)
-    if not cf then return end
-
-    -- Position initiale sauvegardée
-    local originalCF = hrp.CFrame
-
-    -- Téléporte directement à l'intérieur de l'objet pour déclencher Touched
-    hrp.CFrame = cf
-
-    -- Laisse le moteur physique enregistrer le touch
-    task.wait(0.05)
-
-    -- Retourne à la position originale si AutoFarm est encore actif
-    -- (sinon on reste sur l'egg pour la téléportation manuelle)
-    if State.AutoFarm then
-        -- On reste en place, la boucle gère le déplacement
+    if hrp and cf then
+        hrp.CFrame = CFrame.new(cf.Position + Vector3.new(0, 4, 0))
     end
 end
 
--- ================================================
--- BYPASS — MÉTHODE 3 : CLICKDETECTOR AVEC DISTANCE BYPASS
--- Ignore la MaxActivationDistance du ClickDetector
--- ================================================
-
-local function TryClickBypass(egg)
-    local function deepFind(parent, className)
-        for _, c in ipairs(parent:GetDescendants()) do
-            if c:IsA(className) then return c end
-        end
-        return nil
-    end
-
-    local cd = deepFind(egg, "ClickDetector")
-    if cd then
-        -- Override temporaire de la distance max
-        local originalDist = cd.MaxActivationDistance
-        cd.MaxActivationDistance = 9999
-        pcall(function() fireclickdetector(cd, 0) end)
-        task.wait(0.02)
-        pcall(function() cd.MaxActivationDistance = originalDist end)
-        return true
-    end
-
-    local pp = deepFind(egg, "ProximityPrompt")
-    if pp then
-        local originalDist = pp.MaxActivationDistance
-        pp.MaxActivationDistance = 9999
-        pp.RequiresLineOfSight = false
-        pcall(function() fireproximityprompt(pp) end)
-        task.wait(0.02)
-        pcall(function()
-            pp.MaxActivationDistance = originalDist
-            pp.RequiresLineOfSight = true
-        end)
-        return true
-    end
-
-    return false
+local function Notify(title, msg, duration)
+    Rayfield:Notify({ Title = title, Content = msg, Duration = duration or 3, Image = 4483362458 })
 end
 
--- ================================================
--- BYPASS — MÉTHODE 4 : SCRIPT SIGNAL / BINDABLE
--- Certains jeux utilisent des BindableEvents internes
--- ================================================
+-- ====================================================================
+-- UTILITAIRES WORKSPACE
+-- ====================================================================
 
-local function TryBindableBypass(egg)
-    local function findBindable(parent)
-        for _, c in ipairs(parent:GetDescendants()) do
-            if c:IsA("BindableEvent") or c:IsA("BindableFunction") then
-                local n = c.Name:lower()
-                if string.find(n,"collect") or string.find(n,"pick")
-                or string.find(n,"grab")   or string.find(n,"egg")
-                or string.find(n,"touch")  or string.find(n,"interact") then
-                    return c
-                end
-            end
-        end
-        return nil
-    end
-
-    local be = findBindable(egg)
-    if be then
-        pcall(function() be:Fire() end)
-        pcall(function() be:Fire(egg) end)
-        return true
-    end
-    return false
-end
-
--- ================================================
--- COLLECTE COMPLÈTE — ENCHAÎNE TOUTES LES MÉTHODES
--- ================================================
-
-local function CollectEgg(egg)
-    -- Téléporte d'abord sur l'œuf
-    local cf = GetPivot(egg)
-    if cf then TeleportTo(cf) end
-    task.wait(0.05)
-
-    -- Méthode 1 : RemoteEvent direct
-    TryFireRemotes(egg)
-
-    -- Méthode 2 : Touch physique
-    TryTouchBypass(egg)
-
-    -- Méthode 3 : ClickDetector distance bypass
-    TryClickBypass(egg)
-
-    -- Méthode 4 : BindableEvent
-    TryBindableBypass(egg)
-
-    -- Dernier recours : tentative générique sur le parent Model
-    if egg:IsA("BasePart") and egg.Parent:IsA("Model") then
-        CollectEgg(egg.Parent)  -- Recommence sur le Model parent
-    end
-end
-
--- ================================================
--- AUTO FARM LOOP
--- ================================================
-
-local function GetEggsInWorkspace()
+local function GetObjectsByKeywords(keywords, typeFilter)
     local results = {}
     for _, obj in ipairs(workspace:GetDescendants()) do
         if obj:IsA("BasePart") or obj:IsA("Model") then
-            if IsEgg(obj.Name) then
-                if State.EggType == "All" or string.find(obj.Name, State.EggType, 1, true) then
+            if MatchAny(obj.Name, keywords) then
+                if not typeFilter or typeFilter == "All"
+                   or string.find(obj.Name, typeFilter, 1, true) then
                     table.insert(results, obj)
                 end
             end
@@ -301,11 +146,220 @@ local function GetEggsInWorkspace()
     return results
 end
 
+local function DeepFind(parent, className)
+    for _, c in ipairs(parent:GetDescendants()) do
+        if c:IsA(className) then return c end
+    end
+    return nil
+end
+
+local function NearestObject(objs)
+    local hrp = GetHRP()
+    if not hrp then return nil end
+    local best, bestDist = nil, math.huge
+    for _, obj in ipairs(objs) do
+        local cf = GetPivot(obj)
+        if cf then
+            local d = (hrp.Position - cf.Position).Magnitude
+            if d < bestDist then bestDist = d; best = obj end
+        end
+    end
+    return best, bestDist
+end
+
+-- ====================================================================
+-- SCAN REMOTEEVENTS DE COLLECTE
+-- ====================================================================
+
+local CollectRemotes = {}
+
+local function ScanRemotes()
+    local found = {}
+    local collect_kw = {"collect","pick","grab","get","egg","touch","interact","claim","hatch","obtain"}
+    local function scan(parent)
+        for _, obj in ipairs(parent:GetDescendants()) do
+            if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
+                local n = obj.Name:lower()
+                for _, kw in ipairs(collect_kw) do
+                    if string.find(n, kw, 1, true) then
+                        table.insert(found, obj)
+                        break
+                    end
+                end
+            end
+        end
+    end
+    scan(ReplicatedStorage)
+    scan(workspace)
+    return found
+end
+
+CollectRemotes = ScanRemotes()
+
+-- ====================================================================
+-- BYPASS — 4 MÉTHODES DE COLLECTE
+-- ====================================================================
+
+local function BypassRemote(egg)
+    if #CollectRemotes == 0 then return end
+    local cf  = GetPivot(egg)
+    local pos = cf and cf.Position or Vector3.zero
+    for _, r in ipairs(CollectRemotes) do
+        pcall(function() r:FireServer() end)
+        pcall(function() r:FireServer(egg) end)
+        pcall(function() r:FireServer(pos) end)
+        pcall(function() r:FireServer(egg, pos) end)
+        pcall(function() r:FireServer(LocalPlayer, egg) end)
+        pcall(function() r:FireServer(true) end)
+        pcall(function() r:FireServer("collect") end)
+        pcall(function() r:FireServer("collect", egg) end)
+    end
+end
+
+local function BypassTouch(egg)
+    local hrp = GetHRP()
+    if not hrp then return end
+    local cf = GetPivot(egg)
+    if not cf then return end
+    hrp.CFrame = cf
+    task.wait(0.05)
+end
+
+local function BypassClick(egg)
+    local cd = DeepFind(egg, "ClickDetector")
+    if cd then
+        local orig = cd.MaxActivationDistance
+        cd.MaxActivationDistance = 9999
+        pcall(function() fireclickdetector(cd, 0) end)
+        task.wait(0.02)
+        pcall(function() cd.MaxActivationDistance = orig end)
+        return true
+    end
+    local pp = DeepFind(egg, "ProximityPrompt")
+    if pp then
+        local orig = pp.MaxActivationDistance
+        pp.MaxActivationDistance = 9999
+        pp.RequiresLineOfSight   = false
+        pcall(function() fireproximityprompt(pp) end)
+        task.wait(0.02)
+        pcall(function()
+            pp.MaxActivationDistance = orig
+            pp.RequiresLineOfSight   = true
+        end)
+        return true
+    end
+    return false
+end
+
+local function BypassBindable(egg)
+    local bindable_kw = {"collect","pick","grab","egg","touch","interact"}
+    for _, c in ipairs(egg:GetDescendants()) do
+        if c:IsA("BindableEvent") or c:IsA("BindableFunction") then
+            local n = c.Name:lower()
+            for _, kw in ipairs(bindable_kw) do
+                if string.find(n, kw, 1, true) then
+                    pcall(function() c:Fire() end)
+                    pcall(function() c:Fire(egg) end)
+                    break
+                end
+            end
+        end
+    end
+end
+
+local function CollectEgg(egg)
+    local cf = GetPivot(egg)
+    if cf then TeleportTo(cf) end
+    task.wait(0.05)
+    BypassRemote(egg)
+    BypassTouch(egg)
+    BypassClick(egg)
+    BypassBindable(egg)
+    -- Remonte sur le Model parent si l'egg est une BasePart enfant
+    if egg:IsA("BasePart") and egg.Parent and egg.Parent:IsA("Model") then
+        BypassRemote(egg.Parent)
+        BypassClick(egg.Parent)
+    end
+end
+
+-- ====================================================================
+-- MOUVEMENT
+-- ====================================================================
+
+local function ApplyWalkSpeed(v)
+    local h = GetHumanoid()
+    if h then h.WalkSpeed = v end
+end
+
+local function StartInfJump()
+    local conn = UserInputService.JumpRequest:Connect(function()
+        if not State.InfJump then return end
+        local h = GetHumanoid()
+        if h then h:ChangeState(Enum.HumanoidStateType.Jumping) end
+    end)
+    table.insert(Connections, conn)
+end
+
+local function StartNoClip()
+    if NoClipConn then NoClipConn:Disconnect() end
+    NoClipConn = RunService.Stepped:Connect(function()
+        if not State.NoClip then return end
+        local c = GetChar()
+        if not c then return end
+        for _, p in ipairs(c:GetDescendants()) do
+            if p:IsA("BasePart") then p.CanCollide = false end
+        end
+    end)
+end
+
+-- ====================================================================
+-- GODMODE — INVINCIBILITÉ
+-- ====================================================================
+
+local function StartGodmode()
+    local hum = GetHumanoid()
+    if not hum then return end
+
+    -- Méthode 1 : HealthChanged — réaction instantanée
+    if GodmodeConn then GodmodeConn:Disconnect() end
+    GodmodeConn = hum.HealthChanged:Connect(function(hp)
+        if State.Godmode and hp < hum.MaxHealth then
+            hum.Health = hum.MaxHealth
+        end
+    end)
+
+    -- Méthode 2 : loop 60Hz — couvre les dégâts serveur inter-frame
+    task.spawn(function()
+        while State.Godmode do
+            local h = GetHumanoid()
+            if h then
+                h.MaxHealth = math.huge
+                h.Health    = math.huge
+            end
+            task.wait(0.016)
+        end
+    end)
+end
+
+local function StopGodmode()
+    State.Godmode = false
+    if GodmodeConn then GodmodeConn:Disconnect(); GodmodeConn = nil end
+    local h = GetHumanoid()
+    if h then
+        h.MaxHealth = State.CustomMaxHP
+        h.Health    = State.CustomMaxHP
+    end
+end
+
+-- ====================================================================
+-- AUTO FARM
+-- ====================================================================
+
 local function StartAutoFarm()
     if FarmThread then return end
     FarmThread = task.spawn(function()
         while State.AutoFarm do
-            local eggs = GetEggsInWorkspace()
+            local eggs = GetObjectsByKeywords(EGG_KW, State.EggType)
             if #eggs == 0 then
                 task.wait(0.5)
             else
@@ -321,414 +375,433 @@ local function StartAutoFarm()
     end)
 end
 
-local function StopAutoFarm()
-    State.AutoFarm = false
-    FarmThread = nil
+-- ====================================================================
+-- AUTO SELL
+-- ====================================================================
+
+local function StartAutoSell()
+    if SellThread then return end
+    SellThread = task.spawn(function()
+        while State.AutoSell do
+            local pts = GetObjectsByKeywords(SELL_KW)
+            for _, sp in ipairs(pts) do
+                if not State.AutoSell then break end
+                local cf = GetPivot(sp)
+                if cf then
+                    TeleportTo(cf)
+                    task.wait(0.2)
+                    BypassClick(sp)
+                    BypassRemote(sp)
+                end
+            end
+            task.wait(2)
+        end
+        SellThread = nil
+    end)
 end
 
--- ================================================
--- ALERTE SPAWN — SYSTÈME PRINCIPAL
--- Surveille workspace.DescendantAdded en temps réel
--- ================================================
+-- ====================================================================
+-- AUTO HATCH
+-- ====================================================================
 
--- Joue un son d'alerte local
+local function StartAutoHatch()
+    if HatchThread then return end
+    HatchThread = task.spawn(function()
+        while State.AutoHatch do
+            for _, obj in ipairs(workspace:GetDescendants()) do
+                if not State.AutoHatch then break end
+                if (obj:IsA("BasePart") or obj:IsA("Model"))
+                   and (string.find(obj.Name,"Hatch",1,true)
+                     or string.find(obj.Name,"hatch",1,true)) then
+                    local cf = GetPivot(obj)
+                    if cf then
+                        TeleportTo(cf)
+                        task.wait(0.15)
+                        BypassClick(obj)
+                        BypassRemote(obj)
+                    end
+                end
+            end
+            task.wait(1)
+        end
+        HatchThread = nil
+    end)
+end
+
+-- ====================================================================
+-- SPAWN ALERT — SURVEILLANCE ŒUFS RARES
+-- ====================================================================
+
 local function PlayAlertSound()
     if not State.AlertSound then return end
-    local sound = Instance.new("Sound")
-    sound.SoundId = "rbxassetid://9118788073"  -- son d'alerte Roblox natif
-    sound.Volume  = 1
-    sound.Parent  = workspace
-    sound:Play()
-    game:GetService("Debris"):AddItem(sound, 5)
+    local s = Instance.new("Sound")
+    s.SoundId = "rbxassetid://9118788073"
+    s.Volume  = 1
+    s.Parent  = workspace
+    s:Play()
+    Debris:AddItem(s, 5)
 end
 
--- Billboard GUI affiché au-dessus de l'œuf rare
 local function AttachBillboard(egg)
     local cf = GetPivot(egg)
     if not cf then return end
 
-    -- Part invisible ancrée à la position de l'egg
     local anchor = Instance.new("Part")
-    anchor.Anchored    = true
-    anchor.CanCollide  = false
+    anchor.Anchored     = true
+    anchor.CanCollide   = false
     anchor.Transparency = 1
-    anchor.Size        = Vector3.new(1, 1, 1)
-    anchor.CFrame      = cf + Vector3.new(0, 6, 0)
-    anchor.Parent      = workspace
+    anchor.Size         = Vector3.new(1, 1, 1)
+    anchor.CFrame       = cf + Vector3.new(0, 7, 0)
+    anchor.Parent       = workspace
 
     local bg = Instance.new("BillboardGui")
-    bg.Adornee         = anchor
-    bg.Size            = UDim2.new(0, 200, 0, 60)
-    bg.StudsOffset     = Vector3.new(0, 2, 0)
-    bg.AlwaysOnTop     = true
-    bg.Parent          = anchor
+    bg.Adornee     = anchor
+    bg.Size        = UDim2.new(0, 220, 0, 60)
+    bg.StudsOffset = Vector3.new(0, 2, 0)
+    bg.AlwaysOnTop = true
+    bg.Parent      = anchor
 
     local frame = Instance.new("Frame")
-    frame.Size            = UDim2.new(1, 0, 1, 0)
-    frame.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
-    frame.BackgroundTransparency = 0.2
-    frame.Parent          = bg
+    frame.Size                  = UDim2.new(1, 0, 1, 0)
+    frame.BackgroundColor3      = Color3.fromRGB(220, 30, 30)
+    frame.BackgroundTransparency = 0.1
+    frame.Parent                = bg
     Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
 
     local label = Instance.new("TextLabel")
-    label.Size             = UDim2.new(1, -8, 1, -8)
-    label.Position         = UDim2.new(0, 4, 0, 4)
+    label.Size                  = UDim2.new(1, -8, 1, -8)
+    label.Position              = UDim2.new(0, 4, 0, 4)
     label.BackgroundTransparency = 1
-    label.TextColor3       = Color3.fromRGB(255, 255, 255)
-    label.TextScaled       = true
-    label.Font             = Enum.Font.GothamBold
-    label.Text             = "⚠ " .. egg.Name .. " SPAWNÉ !"
-    label.Parent           = frame
+    label.TextColor3            = Color3.fromRGB(255, 255, 255)
+    label.TextScaled            = true
+    label.Font                  = Enum.Font.GothamBold
+    label.Text                  = "⚠ " .. egg.Name
+    label.Parent                = frame
 
-    -- Auto-destroy après 15 secondes ou si l'egg disparaît
-    task.spawn(function()
-        task.wait(15)
-        if anchor and anchor.Parent then
-            anchor:Destroy()
-        end
-    end)
-
-    -- Détruit aussi le billboard si l'egg est collecté
+    -- Auto-destroy 15s ou si l'egg disparaît
+    task.spawn(function() task.wait(15); if anchor.Parent then anchor:Destroy() end end)
     egg.AncestryChanged:Connect(function()
-        if anchor and anchor.Parent then
-            anchor:Destroy()
-        end
+        if anchor and anchor.Parent then anchor:Destroy() end
     end)
 end
 
--- Notification Roblox native en haut à droite
-local function ShowRobloxNotif(eggName)
-    local StarterGui = game:GetService("StarterGui")
-    pcall(function()
-        StarterGui:SetCore("SendNotification", {
-            Title    = "⚠ ŒOEUF RARE SPAWNÉ",
-            Text     = eggName .. " est apparu !",
-            Duration = 10,
-        })
-    end)
-end
-
--- Highlight rouge vif sur l'egg rare
-local function HighlightRareEgg(egg)
-    -- Supprime l'ancien si présent
-    for _, c in ipairs(egg:GetChildren()) do
-        if c:IsA("Highlight") and c.Name == "AXM_RARE" then c:Destroy() end
-    end
-    if egg:IsA("Model") then
-        for _, part in ipairs(egg:GetDescendants()) do
-            if part:IsA("BasePart") then
-                local existing = part:FindFirstChild("AXM_RARE")
-                if existing then existing:Destroy() end
-            end
-        end
-    end
-
+local function HighlightRare(egg)
     local h = Instance.new("Highlight")
-    h.Name              = "AXM_RARE"
-    h.Adornee           = egg
-    h.FillColor         = Color3.fromRGB(255, 0, 0)
-    h.OutlineColor      = Color3.fromRGB(255, 255, 0)
-    h.FillTransparency  = 0.2
+    h.Name                = "AXM_RARE"
+    h.Adornee             = egg
+    h.FillColor           = Color3.fromRGB(255, 0, 0)
+    h.OutlineColor        = Color3.fromRGB(255, 220, 0)
+    h.FillTransparency    = 0.15
     h.OutlineTransparency = 0
-    h.DepthMode         = Enum.HighlightDepthMode.AlwaysOnTop
-    h.Parent            = egg
+    h.DepthMode           = Enum.HighlightDepthMode.AlwaysOnTop
+    h.Parent              = egg
 end
 
--- Handler principal sur spawn d'un objet
-local function OnDescendantAdded(obj)
-    if not (obj:IsA("BasePart") or obj:IsA("Model")) then return end
-    if KnownEggs[obj] then return end
+local function OnRareSpawn(egg)
+    if KnownRares[egg] then return end
+    KnownRares[egg] = true
 
-    local name = obj.Name
-    if not IsEgg(name) then return end
-    if not IsRare(name) then return end
-
-    -- Évite les doublons (Model + ses BasePart enfants)
-    KnownEggs[obj] = true
-
-    -- Tâche asynchrone pour ne pas bloquer le watcher
     task.spawn(function()
-        task.wait(0.1)  -- Laisse l'objet se finaliser dans le monde
-
-        print(string.format("[AXM ALERTE] Œuf rare détecté : %s", name))
-
-        -- Son d'alerte
+        task.wait(0.1)
+        print(string.format("[AXM ALERTE] %s spawné !", egg.Name))
         PlayAlertSound()
-
-        -- Notification Roblox
-        ShowRobloxNotif(name)
-
-        -- Highlight rouge
-        pcall(HighlightRareEgg, obj)
-
-        -- Billboard au-dessus de l'egg
-        pcall(AttachBillboard, obj)
-
-        -- Téléportation automatique si activée
+        pcall(function()
+            StarterGui:SetCore("SendNotification", {
+                Title    = "⚠ RARE SPAWNÉ",
+                Text     = egg.Name .. " est apparu — téléportation !",
+                Duration = 10,
+            })
+        end)
+        pcall(HighlightRare, egg)
+        pcall(AttachBillboard, egg)
         if State.AutoTeleport then
-            local cf = GetPivot(obj)
-            if cf then
-                TeleportTo(cf)
-                print(string.format("[AXM] Téléporté sur %s.", name))
-            end
+            local cf = GetPivot(egg)
+            if cf then TeleportTo(cf) end
         end
     end)
 end
-
--- ================================================
--- WATCHER — DÉMARRE LA SURVEILLANCE
--- ================================================
-
-local SpawnWatcherConn = nil
 
 local function StartSpawnWatcher()
     if SpawnWatcherConn then return end
-
-    -- Scan initial — eggs déjà présents au lancement
+    -- Scan initial
     for _, obj in ipairs(workspace:GetDescendants()) do
         if (obj:IsA("BasePart") or obj:IsA("Model"))
-           and IsEgg(obj.Name) and IsRare(obj.Name) then
-            KnownEggs[obj] = true
-            pcall(HighlightRareEgg, obj)
+           and MatchAny(obj.Name, EGG_KW)
+           and MatchAny(obj.Name, RARE_KW) then
+            KnownRares[obj] = true
+            pcall(HighlightRare, obj)
         end
     end
-
-    SpawnWatcherConn = workspace.DescendantAdded:Connect(OnDescendantAdded)
+    SpawnWatcherConn = workspace.DescendantAdded:Connect(function(obj)
+        if not State.SpawnAlert then return end
+        if not (obj:IsA("BasePart") or obj:IsA("Model")) then return end
+        if MatchAny(obj.Name, EGG_KW) and MatchAny(obj.Name, RARE_KW) then
+            OnRareSpawn(obj)
+        end
+    end)
     print("[AXM] Spawn watcher actif.")
 end
 
 local function StopSpawnWatcher()
-    if SpawnWatcherConn then
-        SpawnWatcherConn:Disconnect()
-        SpawnWatcherConn = nil
-    end
-    KnownEggs = {}
-    print("[AXM] Spawn watcher arrêté.")
+    if SpawnWatcherConn then SpawnWatcherConn:Disconnect(); SpawnWatcherConn = nil end
+    KnownRares = {}
 end
 
--- ================================================
--- RESCAN DES REMOTES À CHAQUE RESPAWN
--- ================================================
+-- ====================================================================
+-- COMBAT — AUTO-CLICK
+-- ====================================================================
 
-LocalPlayer.CharacterAdded:Connect(function(char)
-    task.wait(0.5)
-    -- Rescan les remotes car le jeu peut en créer de nouveaux
-    CollectRemotes = ScanRemotes()
-    print(string.format("[AXM] Rescan remotes : %d trouvé(s).", #CollectRemotes))
-end)
+local Mouse = LocalPlayer:GetMouse()
 
--- ================================================
--- RAYFIELD UI — ONGLET EGG REFONDU
--- (Colle ça dans la fenêtre Window existante du build v2)
--- ================================================
-
--- Si tu intègres ce fichier séparément, décommente les lignes suivantes :
--- local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
--- local Window = Rayfield:CreateWindow({ Name = "Steal an Egg Hub", Theme = "Default", KeySystem = false })
-
-local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
-local Window = Rayfield:CreateWindow({
-    Name    = "Steal an Egg Hub — Egg System",
-    Theme   = "Default",
-    KeySystem = false,
-    ConfigurationSaving = { Enabled = true, FolderName = "AXM_StealEgg", FileName = "egg_bypass" },
-})
-
--- ================================================
--- ONGLET EGG
--- ================================================
-
-local TabEgg = Window:CreateTab("Egg", 4483362458)
-
-TabEgg:CreateSection("Type d'œuf ciblé")
-
-TabEgg:CreateDropdown({
-    Name    = "Type d'œuf (farm)",
-    Options = {
-        "All",
-        "Common","Uncommon","Rare","Epic","Legendary",
-        "Golden","Rainbow","Shadow","Diamond",
-        "Fire","Ice","Electric","Dark","Light",
-        "Mythical","Eternal","Secret","Divine","Celestial",
-    },
-    CurrentOption   = {"All"},
-    MultipleOptions = false,
-    Flag            = "EggType",
-    Callback        = function(sel)
-        State.EggType = sel[1] or "All"
-        Rayfield:Notify({ Title = "Egg", Content = "Ciblage : " .. State.EggType, Duration = 2 })
-    end,
-})
-
-TabEgg:CreateSection("Farm automatique (bypass)")
-
-TabEgg:CreateToggle({
-    Name         = "Auto Farm (bypass complet)",
-    CurrentValue = false,
-    Flag         = "AutoFarm",
-    Callback     = function(v)
-        State.AutoFarm = v
-        if v then
-            StartAutoFarm()
-            Rayfield:Notify({ Title = "Auto Farm", Content = "4 méthodes de bypass actives.", Duration = 3 })
-        else
-            StopAutoFarm()
-            Rayfield:Notify({ Title = "Auto Farm", Content = "Arrêté.", Duration = 2 })
+local function StartAutoClick()
+    if AutoClickThread then return end
+    AutoClickThread = task.spawn(function()
+        while State.AutoClick do
+            local target = Mouse.Target
+            if target then
+                local cd = target:FindFirstChildOfClass("ClickDetector")
+                if cd then fireclickdetector(cd) end
+                local pp = target:FindFirstChildOfClass("ProximityPrompt")
+                if pp then fireproximityprompt(pp) end
+            end
+            task.wait(1 / State.AutoClickCPS)
         end
-    end,
-})
+        AutoClickThread = nil
+    end)
+end
 
-TabEgg:CreateSlider({
-    Name         = "Délai entre collectes",
-    Range        = {0.05, 1},
-    Increment    = 0.01,
-    Suffix       = " s",
-    CurrentValue = 0.08,
-    Flag         = "FarmDelay",
-    Callback     = function(v)
-        State.FarmDelay = v
-    end,
-})
+-- ====================================================================
+-- COMBAT — AIMBOT
+-- ====================================================================
 
-TabEgg:CreateButton({
-    Name     = "Scanner les RemoteEvents maintenant",
-    Callback = function()
-        CollectRemotes = ScanRemotes()
-        Rayfield:Notify({
-            Title   = "Bypass",
-            Content = string.format("%d remote(s) de collecte trouvé(s).", #CollectRemotes),
-            Duration = 4,
-        })
-        for i, r in ipairs(CollectRemotes) do
-            print(string.format("[AXM Remote #%d] %s — %s", i, r.ClassName, r:GetFullName()))
-        end
-    end,
-})
-
-TabEgg:CreateButton({
-    Name     = "Collecter l'œuf le plus proche (manuel)",
-    Callback = function()
-        local hrp = GetHRP()
-        if not hrp then return end
-        local eggs = GetEggsInWorkspace()
-        if #eggs == 0 then
-            Rayfield:Notify({ Title = "Egg", Content = "Aucun œuf trouvé.", Duration = 3 })
-            return
-        end
-        local best, bestDist = nil, math.huge
-        for _, egg in ipairs(eggs) do
-            local cf = GetPivot(egg)
-            if cf then
-                local d = (hrp.Position - cf.Position).Magnitude
-                if d < bestDist then bestDist = d; best = egg end
+local function GetNearestPlayer()
+    local hrp = GetHRP()
+    if not hrp then return nil end
+    local best, bestDist = nil, State.AimbotRange
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and p.Character then
+            local th = p.Character:FindFirstChild("HumanoidRootPart")
+            local hm = p.Character:FindFirstChildOfClass("Humanoid")
+            if th and hm and hm.Health > 0 then
+                local d = (hrp.Position - th.Position).Magnitude
+                if d < bestDist then bestDist = d; best = th end
             end
         end
-        if best then
-            pcall(CollectEgg, best)
-            Rayfield:Notify({ Title = "Egg", Content = "Bypass déclenché sur : " .. best.Name, Duration = 2 })
+    end
+    return best
+end
+
+local function StartAimbot()
+    if AimbotThread then return end
+    AimbotThread = task.spawn(function()
+        while State.AimbotOn do
+            local t = GetNearestPlayer()
+            if t then
+                workspace.CurrentCamera.CFrame =
+                    CFrame.new(workspace.CurrentCamera.CFrame.Position, t.Position)
+            end
+            task.wait(0.016)
         end
-    end,
-})
+        AimbotThread = nil
+    end)
+end
 
--- ================================================
--- ONGLET ALERTE SPAWN
--- ================================================
+-- ====================================================================
+-- ESP
+-- ====================================================================
 
-local TabAlert = Window:CreateTab("Spawn Alert", 4483362458)
+local function ClearESP()
+    if ESPFolder then ESPFolder:Destroy(); ESPFolder = nil end
+end
 
-TabAlert:CreateSection("Surveillance temps réel")
+local function MakeHighlight(adornee, fill, outline)
+    if not ESPFolder then return end
+    for _, h in ipairs(ESPFolder:GetChildren()) do
+        if h:IsA("Highlight") and h.Adornee == adornee then return end
+    end
+    local h = Instance.new("Highlight")
+    h.Adornee             = adornee
+    h.FillColor           = fill
+    h.OutlineColor        = outline
+    h.FillTransparency    = 0.5
+    h.OutlineTransparency = 0
+    h.DepthMode           = Enum.HighlightDepthMode.AlwaysOnTop
+    h.Parent              = ESPFolder
+end
 
-TabAlert:CreateToggle({
-    Name         = "Activer le watcher",
-    CurrentValue = true,
-    Flag         = "SpawnAlert",
-    Callback     = function(v)
-        State.SpawnAlert = v
-        if v then
-            StartSpawnWatcher()
-            Rayfield:Notify({ Title = "Spawn Alert", Content = "Surveillance active.", Duration = 2 })
-        else
-            StopSpawnWatcher()
-            Rayfield:Notify({ Title = "Spawn Alert", Content = "Surveillance arrêtée.", Duration = 2 })
-        end
-    end,
-})
+local function BuildESP()
+    ClearESP()
+    for _, c in ipairs(Connections) do if c then c:Disconnect() end end
+    Connections = {}
 
-TabAlert:CreateToggle({
-    Name         = "Téléportation automatique sur spawn",
-    CurrentValue = true,
-    Flag         = "AutoTeleport",
-    Callback     = function(v)
-        State.AutoTeleport = v
-    end,
-})
+    ESPFolder        = Instance.new("Folder")
+    ESPFolder.Name   = "AXM_ESP"
+    ESPFolder.Parent = workspace
 
-TabAlert:CreateToggle({
-    Name         = "Son d'alerte",
-    CurrentValue = true,
-    Flag         = "AlertSound",
-    Callback     = function(v)
-        State.AlertSound = v
-    end,
-})
-
-TabAlert:CreateSection("Œufs surveillés")
-
-TabAlert:CreateLabel("Eternal | Secret | Mythic | Divine | Celestial | Omega | Ultra | Godly")
-
-TabAlert:CreateButton({
-    Name     = "Voir les eggs rares déjà présents",
-    Callback = function()
-        local count = 0
-        for _, obj in ipairs(workspace:GetDescendants()) do
-            if (obj:IsA("BasePart") or obj:IsA("Model"))
-               and IsEgg(obj.Name) and IsRare(obj.Name) then
-                count += 1
-                print(string.format("[AXM Rare] %s — %s", obj.Name, obj:GetFullName()))
+    if State.ESPPlayers then
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer and p.Character then
+                MakeHighlight(p.Character,
+                    Color3.fromRGB(255,80,80), Color3.fromRGB(255,255,255))
             end
         end
-        Rayfield:Notify({
-            Title   = "Spawn Alert",
-            Content = string.format("%d œuf(s) rare(s) actuellement en jeu.", count),
-            Duration = 4,
-        })
-    end,
-})
-
-TabAlert:CreateButton({
-    Name     = "Téléporter sur le rare le plus proche",
-    Callback = function()
-        local hrp = GetHRP()
-        if not hrp then return end
-        local best, bestDist = nil, math.huge
-        for _, obj in ipairs(workspace:GetDescendants()) do
-            if (obj:IsA("BasePart") or obj:IsA("Model"))
-               and IsEgg(obj.Name) and IsRare(obj.Name) then
-                local cf = GetPivot(obj)
-                if cf then
-                    local d = (hrp.Position - cf.Position).Magnitude
-                    if d < bestDist then bestDist = d; best = cf end
+        table.insert(Connections, Players.PlayerAdded:Connect(function(p)
+            p.CharacterAdded:Connect(function(char)
+                task.wait(0.5)
+                if State.ESPPlayers and ESPFolder then
+                    MakeHighlight(char,
+                        Color3.fromRGB(255,80,80), Color3.fromRGB(255,255,255))
                 end
+            end)
+        end))
+    end
+
+    if State.ESPEggs then
+        for _, obj in ipairs(GetObjectsByKeywords(EGG_KW, State.EggType)) do
+            MakeHighlight(obj,
+                Color3.fromRGB(255,220,50), Color3.fromRGB(255,255,255))
+        end
+        table.insert(Connections, workspace.DescendantAdded:Connect(function(obj)
+            if not State.ESPEggs or not ESPFolder then return end
+            if (obj:IsA("BasePart") or obj:IsA("Model"))
+               and MatchAny(obj.Name, EGG_KW) then
+                task.wait(0.1)
+                MakeHighlight(obj,
+                    Color3.fromRGB(255,220,50), Color3.fromRGB(255,255,255))
+            end
+        end))
+    end
+
+    if State.ESPItems then
+        for _, obj in ipairs(GetObjectsByKeywords(ITEM_KW)) do
+            MakeHighlight(obj,
+                Color3.fromRGB(80,200,255), Color3.fromRGB(255,255,255))
+        end
+    end
+end
+
+-- ====================================================================
+-- MISC
+-- ====================================================================
+
+local function ApplyNoFog(on)
+    local L = game:GetService("Lighting")
+    if on then
+        for _, e in ipairs(L:GetChildren()) do
+            if e:IsA("FogEffect") or e:IsA("Atmosphere") then
+                e.Enabled = false
             end
         end
-        if best then
-            TeleportTo(best)
-            Rayfield:Notify({ Title = "Spawn Alert", Content = string.format("Téléporté (%.1f studs).", bestDist), Duration = 2 })
+        L.FogEnd = 100000; L.FogStart = 99999
+    else
+        L.FogEnd = 100000; L.FogStart = 0
+    end
+end
+
+-- ====================================================================
+-- RESPAWN — RÉAPPLICATION AUTOMATIQUE DE TOUT
+-- ====================================================================
+
+local function OnCharacterAdded(character)
+    task.wait(0.6)
+
+    local hum = character:WaitForChild("Humanoid", 5)
+    if hum then hum.WalkSpeed = State.WalkSpeed end
+
+    if State.InfJump  then StartInfJump() end
+    if State.NoClip   then StartNoClip() end
+    if State.Godmode  then StartGodmode() end
+
+    -- Rescan remotes après respawn
+    CollectRemotes = ScanRemotes()
+
+    if State.ESPPlayers or State.ESPEggs or State.ESPItems then
+        task.wait(0.3); BuildESP()
+    end
+
+    Notify("Respawn", "Tous les paramètres réappliqués.", 2)
+end
+
+LocalPlayer.CharacterAdded:Connect(OnCharacterAdded)
+
+-- ====================================================================
+-- RAYFIELD — FENÊTRE
+-- ====================================================================
+
+local Window = Rayfield:CreateWindow({
+    Name             = "Steal an Egg Hub",
+    LoadingTitle     = "Chargement...",
+    LoadingSubtitle  = "Build Final",
+    Theme            = "Default",
+    DisableRayfieldPrompts = false,
+    DisableBuildWarnings   = false,
+    ConfigurationSaving = {
+        Enabled    = true,
+        FolderName = "AXM_StealEgg",
+        FileName   = "build_final",
+    },
+    KeySystem = false,
+})
+
+-- ====================================================================
+-- ONGLET 1 — MOUVEMENT
+-- ====================================================================
+
+local TabMove = Window:CreateTab("Mouvement", 4483362458)
+
+TabMove:CreateSlider({
+    Name = "WalkSpeed", Range = {16,150}, Increment = 1,
+    Suffix = " studs/s", CurrentValue = 16, Flag = "WalkSpeed",
+    Callback = function(v) State.WalkSpeed = v; ApplyWalkSpeed(v) end,
+})
+
+TabMove:CreateToggle({
+    Name = "Inf Jump", CurrentValue = false, Flag = "InfJump",
+    Callback = function(v)
+        State.InfJump = v
+        if v then StartInfJump() end
+    end,
+})
+
+TabMove:CreateToggle({
+    Name = "No Clip", CurrentValue = false, Flag = "NoClip",
+    Callback = function(v)
+        State.NoClip = v
+        if v then StartNoClip()
         else
-            Rayfield:Notify({ Title = "Spawn Alert", Content = "Aucun rare détecté en ce moment.", Duration = 3 })
+            if NoClipConn then NoClipConn:Disconnect(); NoClipConn = nil end
         end
     end,
 })
 
--- ================================================
--- DÉMARRAGE AUTOMATIQUE DU WATCHER
--- ================================================
-
-StartSpawnWatcher()
-
-Rayfield:Notify({
-    Title   = "Steal an Egg Hub",
-    Content = "Bypass actif. Watcher démarré. Remotes scannés : " .. #CollectRemotes,
-    Duration = 5,
-    Image   = 4483362458,
+TabMove:CreateButton({
+    Name = "Reset vitesse",
+    Callback = function()
+        State.WalkSpeed = 16; ApplyWalkSpeed(16)
+        Notify("Mouvement", "Vitesse remise à 16.", 2)
+    end,
 })
+
+-- ====================================================================
+-- ONGLET 2 — SURVIE (GODMODE)
+-- ====================================================================
+
+local TabSurvie = Window:CreateTab("Survie", 4483362458)
+
+TabSurvie:CreateSection("Invincibilité")
+
+TabSurvie:CreateToggle({
+    Name = "Godmode (invincible)", CurrentValue = false, Flag = "Godmode",
+    Callback = function(v)
+        State.Godmode = v
+        if v then
+            StartGodmode()
+            Notify("Godmode", "Invincible — HP verrouillés à ∞.", 3)
+        else
+            StopGodmode()
+            Notify("Godmode", "Désactivé.", 2)
+        end
+    end,
+})
+
+TabSurvie:CreateSlider({
