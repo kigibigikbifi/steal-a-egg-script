@@ -1,5 +1,5 @@
 -- ================================================
--- STEAL AN EGG HUB — FULL BUILD v3 (BYPASS HARDENED)
+-- STEAL AN EGG HUB — FULL BUILD v4 (WALK + BYPASS)
 -- 7 onglets | Rayfield Library
 -- ================================================
 
@@ -8,9 +8,7 @@ local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 local Players         = game:GetService("Players")
 local RunService      = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local TweenService    = game:GetService("TweenService")
-local PhysicsService  = game:GetService("PhysicsService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local PathfindingService = game:GetService("PathfindingService")
 
 local LocalPlayer = Players.LocalPlayer
 local Mouse       = LocalPlayer:GetMouse()
@@ -24,10 +22,11 @@ local State = {
     WalkSpeed    = 16,
     InfJump      = false,
     NoClip       = false,
-    SpeedBoost   = false,
-    -- Egg
+    -- Auto Farm par Zone & Déplacement naturel
     AutoFarm     = false,
     EggType      = "All",
+    ZoneMin      = Vector3.new(-50, 0, -50),
+    ZoneMax      = Vector3.new(50, 0, 50),
     AutoSell     = false,
     AutoHatch    = false,
     -- Combat
@@ -42,9 +41,6 @@ local State = {
     -- Misc
     AntiAFK      = false,
     NoFog        = false,
-    InfCoins     = false,
-    -- Server
-    ServerRegion = "Auto",
 }
 
 local Connections    = {}
@@ -55,7 +51,7 @@ local AimbotThread   = nil
 local AntiAFKConn    = nil
 
 -- ================================================
--- UTILITAIRES & BYPASS DE FIRE ROBUSTE
+-- UTILITAIRES & FIX WALK=& BYPASS
 -- ================================================
 
 local function GetCharacter()
@@ -83,19 +79,31 @@ local function ClearConnections()
     Connections = {}
 end
 
--- Bypass universel pour déclencher les interactions (Anti-Anti-Cheat / Remote / Proximity)
+-- Correction Anti-Cheat pour forcer le WalkSpeed à chaque frame si nécessaire
+local WalkSpeedConn = nil
+local function ApplyWalkSpeed(v)
+    local h = GetHumanoid()
+    if h then h.WalkSpeed = v end
+    
+    if WalkSpeedConn then WalkSpeedConn:Disconnect() end
+    WalkSpeedConn = RunService.Heartbeat:Connect(function()
+        local humanoid = GetHumanoid()
+        if humanoid and humanoid.WalkSpeed ~= State.WalkSpeed then
+            humanoid.WalkSpeed = State.WalkSpeed
+        end
+    end)
+    table.insert(Connections, WalkSpeedConn)
+end
+
+-- Bypass universel pour interagir sans se téléporter
 local function BypassFire(instance)
     if not instance then return end
     
-    -- 1. ClickDetector natif ou custom
     local cd = instance:FindFirstChildOfClass("ClickDetector") or (instance:IsA("Model") and instance:FindFirstChild("ClickDetector", true))
     if cd then
-        pcall(function()
-            fireclickdetector(cd)
-        end)
+        pcall(function() fireclickdetector(cd) end)
     end
 
-    -- 2. ProximityPrompt avec modification instantanée de la distance/durée si requis
     local pp = instance:FindFirstChildOfClass("ProximityPrompt") or (instance:IsA("Model") and instance:FindFirstChild("ProximityPrompt", true))
     if pp then
         pcall(function()
@@ -105,7 +113,6 @@ local function BypassFire(instance)
         end)
     end
 
-    -- 3. TouchInterest (pour les objets ramassables par contact physique)
     local touchPart = instance:IsA("BasePart") and instance or (instance:IsA("Model") and (instance.PrimaryPart or instance:FindFirstChildOfClass("BasePart")))
     local hrp = GetHRP()
     if touchPart and hrp then
@@ -120,7 +127,7 @@ local function BypassFire(instance)
     end
 end
 
--- Recherche élargie insensible à la casse
+-- Mots-clés
 local EGG_KEYWORDS  = {"egg","oeuf","coin","reward","drop"}
 local SELL_KEYWORDS = {"sell","shop","vendor","npc","bank","exchange"}
 local ITEM_KEYWORDS = {"collectible","pickup","item","drop","chest"}
@@ -133,12 +140,56 @@ local function MatchKeywords(name, keywords)
     return false
 end
 
-local function GetEggsInWorkspace()
+local function GetPivot(obj)
+    if obj:IsA("Model") then
+        local ok, cf = pcall(function() return obj:GetPivot() end)
+        if ok then return cf.Position end
+        local p = obj.PrimaryPart or obj:FindFirstChildOfClass("BasePart")
+        return p and p.Position or nil
+    elseif obj:IsA("BasePart") then
+        return obj.Position
+    end
+    return nil
+end
+
+-- Déplacement naturel en marchant (Pathfinding ou MoveTo direct)
+local function WalkToPosition(targetPos)
+    local humanoid = GetHumanoid()
+    local hrp = GetHRP()
+    if not humanoid or not hrp then return end
+
+    humanoid:MoveTo(targetPos)
+    
+    -- Attendre que le perso arrive ou que le temps dépasse
+    local startTime = tick()
+    repeat
+        task.wait(0.2)
+        if not State.AutoFarm then break end
+        local dist = (Vector3.new(hrp.Position.X, 0, hrp.Position.Z) - Vector3.new(targetPos.X, 0, targetPos.Z)).Magnitude
+        if dist < 4 then break end
+    until tick() - startTime > 6
+end
+
+-- Vérifie si une position est dans la zone définie par le joueur
+local function IsInZone(pos)
+    if not pos then return false end
+    local minX = math.min(State.ZoneMin.X, State.ZoneMax.X)
+    local maxX = math.max(State.ZoneMin.X, State.ZoneMax.X)
+    local minZ = math.min(State.ZoneMin.Z, State.ZoneMax.Z)
+    local maxZ = math.max(State.ZoneMin.Z, State.ZoneMax.Z)
+
+    return pos.X >= minX and pos.X <= maxX and pos.Z >= minZ and pos.Z <= maxZ
+end
+
+local function GetEggsInZone()
     local results = {}
     for _, obj in ipairs(workspace:GetDescendants()) do
         if (obj:IsA("BasePart") or obj:IsA("Model")) and MatchKeywords(obj.Name, EGG_KEYWORDS) then
-            if State.EggType == "All" or string.find(string.lower(obj.Name), string.lower(State.EggType), 1, true) then
-                table.insert(results, obj)
+            local pos = GetPivot(obj)
+            if pos and IsInZone(pos) then
+                if State.EggType == "All" or string.find(string.lower(obj.Name), string.lower(State.EggType), 1, true) then
+                    table.insert(results, {Object = obj, Position = pos})
+                end
             end
         end
     end
@@ -155,33 +206,9 @@ local function GetSellPoints()
     return results
 end
 
-local function GetPivot(obj)
-    if obj:IsA("Model") then
-        local ok, cf = pcall(function() return obj:GetPivot() end)
-        if ok then return cf end
-        local p = obj.PrimaryPart or obj:FindFirstChildOfClass("BasePart")
-        return p and p.CFrame or nil
-    elseif obj:IsA("BasePart") then
-        return obj.CFrame
-    end
-    return nil
-end
-
-local function TeleportTo(cf)
-    local hrp = GetHRP()
-    if hrp and cf then
-        hrp.CFrame = cf + Vector3.new(0, 3, 0)
-    end
-end
-
 -- ================================================
--- MOUVEMENT
+-- MOUVEMENT (INF JUMP & NOCLIP)
 -- ================================================
-
-local function ApplyWalkSpeed(v)
-    local h = GetHumanoid()
-    if h then h.WalkSpeed = v end
-end
 
 local function StartInfJump()
     local conn = UserInputService.JumpRequest:Connect(function()
@@ -207,7 +234,7 @@ local function StartNoClip()
 end
 
 -- ================================================
--- EGG — FARM AUTOMATIQUE OPTIMISÉ
+-- AUTO FARM PAR ZONE (MARCHE SANS TÉLÉPORTATION)
 -- ================================================
 
 local function StopAutoFarm()
@@ -219,25 +246,36 @@ local function StartAutoFarm()
     if AutoFarmThread then return end
     AutoFarmThread = task.spawn(function()
         while State.AutoFarm do
-            local eggs = GetEggsInWorkspace()
-            for _, egg in ipairs(eggs) do
-                if not State.AutoFarm then break end
-                local cf = GetPivot(egg)
-                if cf then
-                    TeleportTo(cf)
-                    task.wait(0.08)
-                    BypassFire(egg)
-                    task.wait(0.05)
+            local eggs = GetEggsInZone()
+            if #eggs > 0 then
+                -- Trier par distance pour aller au plus près en marchant
+                table.sort(eggs, function(a, b)
+                    local hrp = GetHRP()
+                    if not hrp then return false end
+                    return (hrp.Position - a.Position).Magnitude < (hrp.Position - b.Position).Magnitude
+                end)
+
+                for _, eggData in ipairs(eggs) do
+                    if not State.AutoFarm then break end
+                    WalkToPosition(eggData.Position)
+                    task.wait(0.1)
+                    BypassFire(eggData.Object)
+                    task.wait(0.2)
                 end
+            else
+                -- Si aucun œuf dans la zone, patrouiller / faire des aller-retours au centre de la zone
+                local midX = (State.ZoneMin.X + State.ZoneMax.X) / 2
+                local midZ = (State.ZoneMin.Z + State.ZoneMax.Z) / 2
+                WalkToPosition(Vector3.new(midX, GetHRP() and GetHRP().Position.Y or 0, midZ))
             end
-            task.wait(0.2)
+            task.wait(0.5)
         end
         AutoFarmThread = nil
     end)
 end
 
 -- ================================================
--- EGG — AUTO VENTE
+-- AUTO VENTE (EN MARCHANT)
 -- ================================================
 
 local function StopAutoSell()
@@ -252,106 +290,21 @@ local function StartAutoSell()
             local points = GetSellPoints()
             for _, sp in ipairs(points) do
                 if not State.AutoSell then break end
-                local cf = GetPivot(sp)
-                if cf then
-                    TeleportTo(cf)
-                    task.wait(0.1)
+                local pos = GetPivot(sp)
+                if pos then
+                    WalkToPosition(pos)
+                    task.wait(0.2)
                     BypassFire(sp)
                 end
             end
-            task.wait(1.5)
+            task.wait(2)
         end
         AutoSellThread = nil
     end)
 end
 
 -- ================================================
--- EGG — AUTO ÉCLUSION (HATCH)
--- ================================================
-
-local AutoHatchThread = nil
-local function StartAutoHatch()
-    if AutoHatchThread then return end
-    AutoHatchThread = task.spawn(function()
-        while State.AutoHatch do
-            for _, obj in ipairs(workspace:GetDescendants()) do
-                if not State.AutoHatch then break end
-                if (obj:IsA("BasePart") or obj:IsA("Model")) and MatchKeywords(obj.Name, {"hatch","open","incubator"}) then
-                    local cf = GetPivot(obj)
-                    if cf then
-                        TeleportTo(cf)
-                        task.wait(0.1)
-                        BypassFire(obj)
-                    end
-                end
-            end
-            task.wait(0.5)
-        end
-        AutoHatchThread = nil
-    end)
-end
-
--- ================================================
--- COMBAT — AUTO-CLICK
--- ================================================
-
-local AutoClickThread = nil
-local function StartAutoClick()
-    if AutoClickThread then return end
-    AutoClickThread = task.spawn(function()
-        while State.AutoClick do
-            local target = Mouse.Target
-            if target then
-                BypassFire(target)
-            end
-            task.wait(1 / State.AutoClickCPS)
-        end
-        AutoClickThread = nil
-    end)
-end
-
--- ================================================
--- COMBAT — AIMBOT
--- ================================================
-
-local function GetNearestPlayer()
-    local hrp = GetHRP()
-    if not hrp then return nil end
-    local best, bestDist = nil, State.AimbotRange
-
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and p.Character then
-            local th = p.Character:FindFirstChild("HumanoidRootPart")
-            local hm = p.Character:FindFirstChildOfClass("Humanoid")
-            if th and hm and hm.Health > 0 then
-                local dist = (hrp.Position - th.Position).Magnitude
-                if dist < bestDist then
-                    bestDist = dist
-                    best = th
-                end
-            end
-        end
-    end
-    return best
-end
-
-local function StartAimbot()
-    if AimbotThread then return end
-    AimbotThread = task.spawn(function()
-        while State.AimbotOn do
-            local target = GetNearestPlayer()
-            if target then
-                local camera = workspace.CurrentCamera
-                camera.CFrame = CFrame.new(camera.CFrame.Position, target.Position)
-            end
-            task.wait(0.016)
-        end
-        AimbotThread = nil
-    end)
-end
-
--- ================================================
--- ESP — SYSTÈME DE SURBRILLANCE
+-- ESP & AUTRES
 -- ================================================
 
 local function ClearESP()
@@ -382,41 +335,10 @@ local function BuildESP()
     ESPFolder.Name   = "AXM_ESP"
     ESPFolder.Parent = workspace
 
-    if State.ESPPlayers then
-        for _, p in ipairs(Players:GetPlayers()) do
-            if p ~= LocalPlayer and p.Character then
-                MakeHighlight(p.Character, Color3.fromRGB(255, 80, 80), Color3.fromRGB(255, 255, 255))
-            end
-        end
-        local c1 = Players.PlayerAdded:Connect(function(p)
-            p.CharacterAdded:Connect(function(char)
-                task.wait(0.5)
-                if State.ESPPlayers and ESPFolder then
-                    MakeHighlight(char, Color3.fromRGB(255, 80, 80), Color3.fromRGB(255, 255, 255))
-                end
-            end)
-        end)
-        table.insert(Connections, c1)
-    end
-
     if State.ESPEggs then
-        for _, obj in ipairs(GetEggsInWorkspace()) do
-            MakeHighlight(obj, Color3.fromRGB(255, 220, 50), Color3.fromRGB(255, 255, 255))
-        end
-        local c2 = workspace.DescendantAdded:Connect(function(obj)
-            if not State.ESPEggs or not ESPFolder then return end
-            if (obj:IsA("BasePart") or obj:IsA("Model")) and MatchKeywords(obj.Name, EGG_KEYWORDS) then
-                task.wait(0.1)
-                MakeHighlight(obj, Color3.fromRGB(255, 220, 50), Color3.fromRGB(255, 255, 255))
-            end
-        end)
-        table.insert(Connections, c2)
-    end
-
-    if State.ESPItems then
         for _, obj in ipairs(workspace:GetDescendants()) do
-            if (obj:IsA("BasePart") or obj:IsA("Model")) and MatchKeywords(obj.Name, ITEM_KEYWORDS) then
-                MakeHighlight(obj, Color3.fromRGB(80, 200, 255), Color3.fromRGB(255, 255, 255))
+            if (obj:IsA("BasePart") or obj:IsA("Model")) and MatchKeywords(obj.Name, EGG_KEYWORDS) then
+                MakeHighlight(obj, Color3.fromRGB(255, 220, 50), Color3.fromRGB(255, 255, 255))
             end
         end
     end
@@ -424,83 +346,26 @@ end
 
 local function RefreshESP()
     ClearConnections()
-    if State.ESPPlayers or State.ESPEggs or State.ESPItems then
-        BuildESP()
-    else
-        ClearESP()
-    end
+    if State.ESPEggs then BuildESP() else ClearESP() end
 end
-
--- ================================================
--- MISC — ANTI-AFK
--- ================================================
-
-local function StartAntiAFK()
-    AntiAFKConn = RunService.Heartbeat:Connect(function()
-        if not State.AntiAFK then return end
-        local cam = workspace.CurrentCamera
-        if cam then
-            cam.CFrame = cam.CFrame * CFrame.Angles(0, math.rad(0.001), 0)
-        end
-    end)
-end
-
--- ================================================
--- MISC — NO FOG (SANS BROUILLARD)
--- ================================================
-
-local function ApplyNoFog(enabled)
-    local lighting = game:GetService("Lighting")
-    if enabled then
-        for _, effect in ipairs(lighting:GetChildren()) do
-            if effect:IsA("FogEffect") or effect:IsA("Atmosphere") then
-                effect.Enabled = false
-            end
-        end
-        lighting.FogEnd   = 100000
-        lighting.FogStart = 99999
-    else
-        lighting.FogEnd   = 100000
-        lighting.FogStart = 0
-    end
-end
-
--- ================================================
--- RESPAWN
--- ================================================
-
-LocalPlayer.CharacterAdded:Connect(function(character)
-    task.wait(0.6)
-    local hum = character:WaitForChild("Humanoid", 5)
-    if hum then
-        hum.WalkSpeed = State.WalkSpeed
-    end
-    if State.InfJump then StartInfJump() end
-    if State.NoClip then StartNoClip() end
-    if State.ESPPlayers or State.ESPEggs or State.ESPItems then
-        task.wait(0.3)
-        BuildESP()
-    end
-    Notify("Respawn détecté", "Paramètres réappliqués.", 2)
-end)
 
 -- ================================================
 -- INTERFACE RAYFIELD UI
 -- ================================================
 
 local Window = Rayfield:CreateWindow({
-    Name = "Steal an Egg Hub [Bypass v3]",
+    Name = "Steal an Egg Hub [Zone Walk v4]",
     LoadingTitle = "Chargement...",
-    LoadingSubtitle = "Sécurité & Bypass intégrés",
+    LoadingSubtitle = "Auto-Farm par Zone & Fix WalkSpeed",
     Theme = "Default",
-    ConfigurationSaving = { Enabled = true, FolderName = "AXM_StealEgg", FileName = "config_v3" },
+    ConfigurationSaving = { Enabled = true, FolderName = "AXM_StealEgg", FileName = "config_v4" },
     KeySystem = false,
 })
 
 -- Onglet 1 — Mouvement
 local TabMove = Window:CreateTab("Mouvement", 4483362458)
 TabMove:CreateSlider({
-    Name = "Vitesse de marche (WalkSpeed)", Range = {16, 150}, Increment = 1, Suffix = " studs/s", CurrentValue = 16, Flag = "WalkSpeed",
+    Name = "Vitesse de marche (WalkSpeed Fix)", Range = {16, 150}, Increment = 1, Suffix = " studs/s", CurrentValue = 16, Flag = "WalkSpeed",
     Callback = function(v) State.WalkSpeed = v ApplyWalkSpeed(v) end,
 })
 TabMove:CreateToggle({
@@ -512,54 +377,62 @@ TabMove:CreateToggle({
     Callback = function(v) State.NoClip = v if v then StartNoClip() else if NoClipConn then NoClipConn:Disconnect() NoClipConn = nil end end end,
 })
 
--- Onglet 2 — Œufs (Farm avec Bypass)
-local TabEgg = Window:CreateTab("Œufs", 4483362458)
+-- Onglet 2 — Auto Farm par Zone
+local TabEgg = Window:CreateTab("Auto Farm Zone", 4483362458)
+
 TabEgg:CreateDropdown({
     Name = "Type d'œuf", Options = {"All", "Common", "Uncommon", "Rare", "Epic", "Legendary", "Golden", "Mythical"},
     CurrentOption = {"All"}, MultipleOptions = false, Flag = "EggType",
     Callback = function(selected) State.EggType = selected[1] or "All" end,
 })
-TabEgg:CreateToggle({
-    Name = "Auto Farm d'œufs (Bypassé)", CurrentValue = false, Flag = "AutoFarm",
-    Callback = function(v) State.AutoFarm = v if v then StartAutoFarm() else StopAutoFarm() end end,
-})
-TabEgg:CreateToggle({
-    Name = "Auto Vente", CurrentValue = false, Flag = "AutoSell",
-    Callback = function(v) State.AutoSell = v if v then StartAutoSell() else StopAutoSell() end end,
-})
-TabEgg:CreateToggle({
-    Name = "Auto Éclosion (Hatch)", CurrentValue = false, Flag = "AutoHatch",
-    Callback = function(v) State.AutoHatch = v if v then StartAutoHatch() else State.AutoHatch = false end end,
-})
 
--- Onglet 3 — Boutique / Vente
-local TabShop = Window:CreateTab("Boutique", 4483362458)
-TabShop:CreateButton({
-    Name = "Se téléporter au point de vente le plus proche",
-    Callback = function()
-        local pts = GetSellPoints()
-        if #pts > 0 then TeleportTo(GetPivot(pts[1])) end
+TabEgg:CreateInput({
+    Name = "Zone Min (X, Y, Z)", PlaceholderText = "-50, 0, -50", RemoveTextAfterFocusLost = false,
+    Callback = function(text)
+        local x, y, z = text:match("([^,]+),%s*([^,]+),%s*(.+)")
+        if x and y and z then
+            State.ZoneMin = Vector3.new(tonumber(x) or -50, tonumber(y) or 0, tonumber(z) or -50)
+            Notify("Zone", "Zone Min mise à jour.", 2)
+        end
     end,
 })
 
--- Onglet 4 — ESP
+TabEgg:CreateInput({
+    Name = "Zone Max (X, Y, Z)", PlaceholderText = "50, 0, 50", RemoveTextAfterFocusLost = false,
+    Callback = function(text)
+        local x, y, z = text:match("([^,]+),%s*([^,]+),%s*(.+)")
+        if x and y and z then
+            State.ZoneMax = Vector3.new(tonumber(x) or 50, tonumber(y) or 0, tonumber(z) or 50)
+            Notify("Zone", "Zone Max mise à jour.", 2)
+        end
+    end,
+})
+
+TabEgg:CreateButton({
+    Name = "Définir ma position actuelle comme Centre de Zone (Rayon 40)",
+    Callback = function()
+        local hrp = GetHRP()
+        if hrp then
+            local p = hrp.Position
+            State.ZoneMin = Vector3.new(p.X - 40, p.Y - 10, p.Z - 40)
+            State.ZoneMax = Vector3.new(p.X + 40, p.Y + 10, p.Z + 40)
+            Notify("Zone définie", "Zone carrée de 80x80 autour de vous enregistrée !", 3)
+        end
+    end,
+})
+
+TabEgg:CreateToggle({
+    Name = "Activer Auto Farm en marchant (Pas de TP)", CurrentValue = false, Flag = "AutoFarmZone",
+    Callback = function(v) State.AutoFarm = v if v then StartAutoFarm() else StopAutoFarm() end end,
+})
+
+TabEgg:CreateToggle({
+    Name = "Auto Vente (En marchant)", CurrentValue = false, Flag = "AutoSell",
+    Callback = function(v) State.AutoSell = v if v then StartAutoSell() else StopAutoSell() end end,
+})
+
+-- Onglet 3 — ESP
 local TabESP = Window:CreateTab("ESP", 4483362458)
-TabESP:CreateToggle({ Name = "ESP Joueurs", CurrentValue = false, Flag = "ESPPlayers", Callback = function(v) State.ESPPlayers = v RefreshESP() end })
-TabESP:CreateToggle({ Name = "ESP Œufs", CurrentValue = false, Flag = "ESPEggs", Callback = function(v) State.ESPEggs = v RefreshESP() end })
-TabESP:CreateToggle({ Name = "ESP Objets", CurrentValue = false, Flag = "ESPItems", Callback = function(v) State.ESPItems = v RefreshESP() end })
+TabESP:CreateToggle({ Name = "ESP Œufs dans la zone", CurrentValue = false, Flag = "ESPEggs", Callback = function(v) State.ESPEggs = v RefreshESP() end })
 
--- Onglet 5 — Divers (Misc)
-local TabMisc = Window:CreateTab("Divers", 4483362458)
-TabMisc:CreateToggle({ Name = "Anti-AFK", CurrentValue = false, Flag = "AntiAFK", Callback = function(v) State.AntiAFK = v if v then StartAntiAFK() end end })
-TabMisc:CreateToggle({ Name = "Sans Brouillard (No Fog)", CurrentValue = false, Flag = "NoFog", Callback = function(v) ApplyNoFog(v) end })
-
--- Onglet 6 — Combat
-local TabCombat = Window:CreateTab("Combat", 4483362458)
-TabCombat:CreateToggle({ Name = "Auto-Click", CurrentValue = false, Flag = "AutoClick", Callback = function(v) State.AutoClick = v if v then StartAutoClick() end end })
-TabCombat:CreateToggle({ Name = "Aimbot", CurrentValue = false, Flag = "AimbotOn", Callback = function(v) State.AimbotOn = v if v then StartAimbot() end end })
-
--- Onglet 7 — Serveur
-local TabServer = Window:CreateTab("Serveur", 4483362458)
-TabServer:CreateButton({ Name = "Copier le Job ID", Callback = function() print(game.JobId) end })
-
-Notify("Steal an Egg Hub", "Mise à jour v3 (Bypass intégré) prête.", 4)
+Notify("Hub mis à jour", "Marche naturelle par zone & correction WalkSpeed appliquées.", 4)
